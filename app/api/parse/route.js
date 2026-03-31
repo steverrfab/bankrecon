@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx'
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent'
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent'
 
 const PROMPT = `You are parsing a bank statement. Return ONLY valid JSON, no markdown, no explanation:
 {
