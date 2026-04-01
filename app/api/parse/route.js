@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx'
+import Anthropic from '@anthropic-ai/sdk'
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent'
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 const PROMPT = `You are parsing a bank statement. Return ONLY valid JSON, no markdown, no explanation:
 {
@@ -39,27 +40,7 @@ const PROMPT = `You are parsing a bank statement. Return ONLY valid JSON, no mar
   "check_gaps": "",
   "notes": ""
 }
-All amounts must be positive numbers. Extract every single transaction. Separate payroll ACH from settlement ACH from other ACH. Note any gaps in check sequence.`
-
-async function callGemini(contents) {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) throw new Error('GEMINI_API_KEY not set')
-
-  const resp = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents,
-      generationConfig: { temperature: 0, maxOutputTokens: 8192 }
-    })
-  })
-
-  const json = await resp.json()
-  if (json.error) throw new Error(json.error.message)
-
-  const text = json.candidates?.[0]?.content?.parts?.[0]?.text || ''
-  return text.replace(/```json\n?|```/g, '').trim()
-}
+All amounts positive. Extract every transaction. Separate payroll/settlement/other ACH.`
 
 export async function POST(request) {
   try {
@@ -72,26 +53,20 @@ export async function POST(request) {
     const fileName = file.name.toLowerCase()
     const mimeType = file.type
 
-    let raw
+    let messages
 
     if (mimeType === 'application/pdf' || fileName.endsWith('.pdf')) {
       const b64 = buffer.toString('base64')
-      raw = await callGemini([{
-        parts: [
-          { inline_data: { mime_type: 'application/pdf', data: b64 } },
-          { text: PROMPT }
-        ]
-      }])
-
+      messages = [{ role: 'user', content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } },
+        { type: 'text', text: PROMPT }
+      ]}]
     } else if (mimeType.startsWith('image/')) {
       const b64 = buffer.toString('base64')
-      raw = await callGemini([{
-        parts: [
-          { inline_data: { mime_type: mimeType, data: b64 } },
-          { text: PROMPT }
-        ]
-      }])
-
+      messages = [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: mimeType, data: b64 } },
+        { type: 'text', text: PROMPT }
+      ]}]
     } else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls') || mimeType.includes('sheet') || mimeType.includes('excel')) {
       const wb = XLSX.read(buffer, { type: 'buffer' })
       let text = ''
@@ -99,20 +74,21 @@ export async function POST(request) {
         text += `\n=== Sheet: ${name} ===\n`
         text += XLSX.utils.sheet_to_csv(wb.Sheets[name])
       })
-      raw = await callGemini([{
-        parts: [{ text: `Bank statement data from Excel:\n\n${text}\n\n${PROMPT}` }]
-      }])
-
+      messages = [{ role: 'user', content: [{ type: 'text', text: `Bank statement from Excel:\n${text}\n\n${PROMPT}` }] }]
     } else if (fileName.endsWith('.csv') || mimeType === 'text/csv') {
       const text = buffer.toString('utf-8')
-      raw = await callGemini([{
-        parts: [{ text: `Bank statement data from CSV:\n\n${text}\n\n${PROMPT}` }]
-      }])
-
+      messages = [{ role: 'user', content: [{ type: 'text', text: `Bank statement CSV:\n${text}\n\n${PROMPT}` }] }]
     } else {
       return Response.json({ error: `Unsupported file type: ${mimeType || fileName}` }, { status: 400 })
     }
 
+    const response = await client.messages.create({
+      model: 'claude-opus-4-5',
+      max_tokens: 8000,
+      messages,
+    })
+
+    const raw = response.content.map(c => c.text || '').join('').replace(/```json\n?|```/g, '').trim()
     const parsed = JSON.parse(raw)
     return Response.json({ data: parsed })
 
